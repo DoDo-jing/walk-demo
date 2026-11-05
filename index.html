@@ -220,8 +220,7 @@
 
   let last = performance.now();
   function loop(now) {
-    const dt = Math.min(.05, (now - last) / 1000); last = now;
-    if (running) {
+    const dt = Math.min(.05, (now - last) / 1000); last = now;    if (running) {
       const sp = (keys.shift ? 2.6 : 1.5) * dt;
       let mx = 0, my = 0;
       if (keys.w) { mx += Math.cos(ang); my += Math.sin(ang); }
@@ -239,6 +238,8 @@
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);
+  // rAF 在后台/被遮挡时会暂停，补一条定时器兜底
+  setInterval(() => { if (!running) return; loop(performance.now()); }, 33);
 
   addEventListener('keydown', e => {
     const k = e.key.toLowerCase();
@@ -266,6 +267,9 @@
     running = true;
     startEl.style.display = 'none';
   });
+  window.__dbg = () => ({ x: +px.toFixed(2), y: +py.toFixed(2), ang: +ang.toFixed(2), running, focus: document.hasFocus(), err: window.__err || null });
+  window.__keys = keys;
+  window.addEventListener('error', e => { window.__err = String(e.message) + ' @' + e.lineno });
 })();
 </script>
 </body>
