@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>走一圈 · 豆豆鲸</title>
+<style>
+  html,body{margin:0;height:100%;background:#0a0f1a;overflow:hidden;
+    font-family:"Microsoft YaHei",Tahoma,sans-serif;color:#cfe0ff}
+  #cv{display:block;width:100vw;height:100vh;image-rendering:pixelated;cursor:crosshair}
+  .hud{position:fixed;left:16px;top:14px;font-size:13px;line-height:1.6;color:#8fb0e0;
+       text-shadow:0 1px 4px #000;pointer-events:none}
+  .hud b{color:#cfe0ff}
+  .tip{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);font-size:13px;
+       color:#7f9ec9;background:rgba(8,14,26,.72);border:1px solid #1e3358;border-radius:20px;
+       padding:7px 16px;pointer-events:none}
+  .cross{position:fixed;left:50%;top:50%;width:10px;height:10px;margin:-5px 0 0 -5px;
+         border:1px solid rgba(207,224,255,.5);border-radius:50%;pointer-events:none}
+  .map{position:fixed;right:14px;top:14px;opacity:.55}
+  .start{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+         background:rgba(6,10,18,.86);backdrop-filter:blur(2px);z-index:9;cursor:pointer}
+  .start div{text-align:center;line-height:2}
+  .start h1{font-size:26px;margin:0 0 6px;font-weight:800;letter-spacing:2px}
+  .start p{margin:0;font-size:13px;color:#8fb0e0}
+  .start em{font-style:normal;color:#5b7fb8;font-size:12px}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div class="hud"><b>W A S D</b> / 方向键：走　<b>Shift</b>：跑<br><b>鼠标</b>：转视角　<b>M</b>：小地图</div>
+<div class="cross"></div>
+<canvas class="map" id="map" width="132" height="132"></canvas>
+<div class="tip">走廊尽头有扇门，过去看看</div>
+<div class="start" id="start"><div><h1>走一圈</h1><p>点一下开始，然后按住 W 或 ↑</p><em>第一人称 · 走廊 · 没有敌人</em></div></div>
+
+<script>
+(() => {
+  const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+  const mapCv = document.getElementById('map'), mctx = mapCv.getContext('2d');
+  const startEl = document.getElementById('start');
+
+  // 地图：1 墙 0 空 2 门
+  const MAP = [
+    "11111111111111111111",
+    "10000000000000000001",
+    "10111101111101111101",
+    "10100001000001000001",
+    "10101111011111011101",
+    "10101000000000000101",
+    "10101011101111110101",
+    "10100010001000000101",
+    "10111010111011111101",
+    "10000010000000000001",
+    "10111111101111111001",
+    "10000000000000000201",
+    "11111111111111111111",
+  ].map(r => r.split('').map(Number));
+
+  const H = MAP.length, W = MAP[0].length;
+  let px = 2.5, py = 1.5, ang = 0.0;      // 起点
+  const FOV = Math.PI / 3;                 // 60°
+  const keys = Object.create(null);
+  let running = false, showMap = true;
+
+  const solid = (x, y) => {
+    if (x < 0 || y < 0 || x >= W || y >= H) return true;
+    return MAP[Math.floor(y)][Math.floor(x)] !== 0;
+  };
+
+  function resize() {
+    cv.width = Math.min(1280, Math.max(640, Math.floor(innerWidth * 0.9)));
+    cv.height = Math.floor(innerHeight * 0.9);
+    cv.style.imageRendering = 'auto';
+  }
+  addEventListener('resize', resize); resize();
+
+  // 墙面色带（按墙面朝向 + 距离）
+  function shade(dist, side) {
+    const fog = Math.min(1, dist / 11);
+    const base = side ? 52 : 78;
+    const v = Math.max(10, Math.round(base * (1 - fog) + 12));
+    return `rgb(${v * .55 | 0},${v * .78 | 0},${Math.min(255, v * 1.25) | 0})`;
+  }
+
+  function castRay(rayAng) {
+    const sin = Math.sin(rayAng), cos = Math.cos(rayAng);
+    let mapX = Math.floor(px), mapY = Math.floor(py);
+    const dx = Math.abs(1 / (cos || 1e-9)), dy = Math.abs(1 / (sin || 1e-9));
+    const stepX = cos < 0 ? -1 : 1, stepY = sin < 0 ? -1 : 1;
+    let sideX = (cos < 0 ? (px - mapX) : (mapX + 1 - px)) * dx;
+    let sideY = (sin < 0 ? (py - mapY) : (mapY + 1 - py)) * dy;
+    let side = 0, hit = false, guard = 0;
+    while (!hit && guard++ < 64) {
+      if (sideX < sideY) { sideX += dx; mapX += stepX; side = 0; }
+      else { sideY += dy; mapY += stepY; side = 1; }
+      if (mapX < 0 || mapY < 0 || mapX >= W || mapY >= H) break;
+      if (MAP[mapY][mapX] !== 0) hit = true;
+    }
+    const dist = side === 0 ? (sideX - dx) : (sideY - dy);
+    const hx = px + dist * cos, hy = py + dist * sin;
+    const wallX = side === 0 ? hy - Math.floor(hy) : hx - Math.floor(hx);
+    return { dist: Math.max(0.05, dist), side, wallX, cell: hit ? MAP[mapY]?.[mapX] : 1 };
+  }
+
+  function draw() {
+    const w = cv.width, h = cv.height;
+    // 天花板 / 地面
+    const sky = ctx.createLinearGradient(0, 0, 0, h / 2);
+    sky.addColorStop(0, '#0b1526'); sky.addColorStop(1, '#16233c');
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, w, h / 2);
+    const gr = ctx.createLinearGradient(0, h / 2, 0, h);
+    gr.addColorStop(0, '#111a2b'); gr.addColorStop(1, '#070b13');
+    ctx.fillStyle = gr; ctx.fillRect(0, h / 2, w, h / 2);
+
+    const cols = Math.min(w, 640);
+    const colW = w / cols;
+    for (let i = 0; i < cols; i++) {
+      const t = (i / cols - .5) * FOV;
+      const rayAng = ang + t;
+      const r = castRay(rayAng);
+      const corrected = r.dist * Math.cos(t);
+      const lineH = Math.min(h * 1.5, h / Math.max(.12, corrected));
+      const y0 = (h - lineH) / 2;
+      ctx.fillStyle = shade(corrected, r.side);
+      ctx.fillRect(i * colW, y0, colW + 1, lineH);
+
+      // 砖缝 + 砖块明暗：竖缝按墙面横向坐标，横缝按高度分两行
+      if (corrected < 9) {
+        const u = r.wallX;
+        const phase = (u * 4) % 1;
+        const brickId = Math.floor(u * 4);
+        const noise = ((brickId * 37 + Math.floor((i / colW) * 0.5)) % 7) / 7;
+        if (r.cell === 2) {
+          ctx.fillStyle = 'rgba(90,160,255,.22)';
+          ctx.fillRect(i * colW, y0, colW + 1, lineH);
+        } else {
+          ctx.fillStyle = `rgba(255,255,255,${0.02 + noise * 0.035})`;
+          ctx.fillRect(i * colW, y0, colW + 1, lineH);
+          // 上下两排砖的亮度差
+          ctx.fillStyle = 'rgba(0,0,0,.16)';
+          ctx.fillRect(i * colW, y0 + lineH * .5, colW + 1, lineH * .5);
+        }
+        if (Math.abs(phase) < .05 || Math.abs(phase - 1) < .05) {
+          ctx.fillStyle = 'rgba(4,8,16,.72)';
+          ctx.fillRect(i * colW, y0, colW + 1, lineH);
+        }
+        ctx.fillStyle = 'rgba(4,8,16,.6)';
+        ctx.fillRect(i * colW, y0 + lineH * .5 - 1, colW + 1, 2);
+      }
+    }
+
+    // 地面网格（透视）
+    const horizon = h / 2;
+    ctx.strokeStyle = 'rgba(120,170,255,.10)';
+    ctx.lineWidth = 1;
+    for (let k = 1; k <= 14; k++) {
+      const z = k * .9;
+      const y = horizon + (h / 2) / z * .5;
+      if (y > h) break;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    }
+    for (let k = -8; k <= 8; k++) {
+      ctx.beginPath(); ctx.moveTo(w / 2 + k * w * .06, horizon); ctx.lineTo(w / 2 + k * w * .55, h); ctx.stroke();
+    }
+    // 光点：走廊里的三个路标 + 尽头的门
+    const spots = [{ x: 4.5, y: 1.5, c: '#5ad1ff' }, { x: 9.5, y: 1.5, c: '#ffcf6b' }, { x: 14.5, y: 1.5, c: '#8affc0' }, { door: true, x: 17.5, y: 11.5, c: '#7fb2ff' }];
+    const seen = spots.map(s => {
+      const dx = s.x - px, dy = s.y - py;
+      return { s, d: Math.hypot(dx, dy), a: Math.atan2(dy, dx) };
+    }).sort((a, b) => b.d - a.d);
+    for (const it of seen) {
+      let rel = it.a - ang;
+      while (rel > Math.PI) rel -= Math.PI * 2;
+      while (rel < -Math.PI) rel += Math.PI * 2;
+      if (Math.abs(rel) > FOV * .62) continue;
+      if (it.d < .4) continue;
+      const sx = w / 2 + Math.tan(rel) * (w / 2) / Math.tan(FOV / 2);
+      const size = Math.min(h * .8, h / it.d * (it.s.door ? .55 : .16));
+      const sy = h / 2 + (it.s.door ? size * .35 : 0);
+      const alpha = Math.max(.15, 1 - it.d / 16);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      if (it.s.door) {
+        ctx.fillStyle = 'rgba(140,190,255,.18)';
+        ctx.fillRect(sx - size * .3, sy - size * .55, size * .6, size * 1.1);
+        ctx.strokeStyle = 'rgba(170,215,255,.7)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(sx - size * .3, sy - size * .55, size * .6, size * 1.1);
+      } else {
+        const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, size);
+        g.addColorStop(0, it.s.c); g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(sx, sy, size, 0, 7); ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // 晕影
+    const vg = ctx.createRadialGradient(w / 2, h / 2, h * .25, w / 2, h / 2, h * .78);
+    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.55)');
+    ctx.fillStyle = vg; ctx.fillRect(0, 0, w, h);
+
+    if (showMap) drawMap();
+  }
+
+  function drawMap() {
+    const s = mapCv.width / Math.max(W, H);
+    mctx.clearRect(0, 0, mapCv.width, mapCv.height);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const v = MAP[y][x];
+      if (!v) continue;
+      mctx.fillStyle = v === 2 ? '#3c6ecb' : '#243a5e';
+      mctx.fillRect(x * s, y * s, s, s);
+    }
+    mctx.fillStyle = '#ffd66b';
+    mctx.beginPath();
+    mctx.arc(px * s, py * s, Math.max(2, s * .5), 0, 7);
+    mctx.fill();
+  }
+
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(.05, (now - last) / 1000); last = now;
+    if (running) {
+      const sp = (keys.shift ? 2.6 : 1.5) * dt;
+      let mx = 0, my = 0;
+      if (keys.w) { mx += Math.cos(ang); my += Math.sin(ang); }
+      if (keys.s) { mx -= Math.cos(ang); my -= Math.sin(ang); }
+      if (keys.a) { mx += Math.cos(ang - Math.PI / 2); my += Math.sin(ang - Math.PI / 2); }
+      if (keys.d) { mx += Math.cos(ang + Math.PI / 2); my += Math.sin(ang + Math.PI / 2); }
+      const len = Math.hypot(mx, my) || 1;
+      const nx = px + mx / len * sp, ny = py + my / len * sp;
+      if (!solid(nx, py)) px = nx;
+      if (!solid(px, ny)) py = ny;
+      if (keys.left) ang -= 1.9 * dt;
+      if (keys.right) ang += 1.9 * dt;
+    }
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (k === 'arrowup' || k === 'w') keys.w = 1;
+    if (k === 'arrowdown' || k === 's') keys.s = 1;
+    if (k === 'arrowleft' || k === 'a') { keys.a = 1; keys.left = 1; }
+    if (k === 'arrowright' || k === 'd') { keys.d = 1; keys.right = 1; }
+    if (k === 'shift') keys.shift = 1;
+    if (k === 'm') showMap = !showMap;
+    if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault();
+  });
+  addEventListener('keyup', e => {
+    const k = e.key.toLowerCase();
+    if (k === 'arrowup' || k === 'w') keys.w = 0;
+    if (k === 'arrowdown' || k === 's') keys.s = 0;
+    if (k === 'arrowleft' || k === 'a') { keys.a = 0; keys.left = 0; }
+    if (k === 'arrowright' || k === 'd') { keys.d = 0; keys.right = 0; }
+    if (k === 'shift') keys.shift = 0;
+  });
+  addEventListener('mousemove', e => {
+    if (!running || !(e.buttons & 1)) return;
+    ang += e.movementX * 0.0032;
+  });
+  startEl.addEventListener('click', () => {
+    running = true;
+    startEl.style.display = 'none';
+  });
+})();
+</script>
+</body>
+</html>
